@@ -238,6 +238,8 @@ void exp_mode_update()
     {
         if (!passingIntersection)
         {
+            bt_serial.print("Passing Intersection at stage: ");
+            bt_serial.println(pathStage);
             // We just hit a NEW intersection. Execute the plan.
             execute_path_logic();
             passingIntersection = true; // Lock until we leave this intersection
@@ -325,7 +327,7 @@ void handle_turn_sequence()
         }
         else
         {
-            change(TurnLeft); // Keep turning ???? Need to test this out more
+            change(TurnRight); // Keep turning ???? Need to test this out more
         }
     }
 }
