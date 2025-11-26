@@ -327,6 +327,25 @@ void process_BT_commands()
             Serial.print("Received via BT: ");
             Serial.println(receivedData);
 
+            // Update runningMode based on received command
+            // Set runningMode accordingly coz only these 4 modes are valid
+            if (receivedData == "stop")
+            {
+                runningMode = "stop";
+            }
+            else if (receivedData == "lfs")
+            {
+                runningMode = "lfs";
+            }
+            else if (receivedData == "exp" || receivedData == "start")
+            {
+                runningMode = "exp";
+            }
+            else if (receivedData == "ttt")
+            {
+                runningMode = "ttt";
+            }
+
             // Reset buffer index for next message
             buffer_index = 0;
         }
@@ -339,47 +358,70 @@ void loop()
     process_BT_commands();
     printToLCD("Running...");
 
-    if (analogRead(Light_Sensor) < 920)
+    digitalWrite(LED, LOW);
+
+    unsigned long currentMillis = millis();
+
+    if (runningMode == "stop")
     {
         change(Stop);
         digitalWrite(LED, HIGH);
         return;
     }
 
-    digitalWrite(LED, LOW);
-
-    unsigned long currentMillis = millis();
-
-    // 1. U-turn 상황 (최우선 처리)
-    if (isUturning)
+    if (runningMode == "lfs")
     {
-        processUturn();
-    }
-    // 2. 일반 주행 상황 (Pulse 구동)
-    else
-    {
-        if (isMotorRunning)
+        if (analogRead(Light_Sensor) < 920)
         {
-            // [RUN 상태: 100ms]
-            lt_mode_update(); // 센서 확인
-            change();         // 설정된 direction으로 이동
-
-            if (currentMillis - previousMillis >= intervalRun)
-            {
-                previousMillis = currentMillis;
-                isMotorRunning = false; // STOP 전환
-            }
+            change(Stop);
+            digitalWrite(LED, HIGH);
+            return;
         }
+
+        // 1. U-turn 상황 (최우선 처리)
+        if (isUturning)
+        {
+            processUturn();
+        }
+
+        // 2. 일반 주행 상황 (Pulse 구동)
         else
         {
-            // [STOP 상태: 120ms]
-            change(Stop); // 정지
-
-            if (currentMillis - previousMillis >= intervalStop)
+            if (isMotorRunning)
             {
-                previousMillis = currentMillis;
-                isMotorRunning = true; // RUN 전환
+                // [RUN 상태: 100ms]
+                lt_mode_update(); // 센서 확인
+                change();         // 설정된 direction으로 이동
+
+                if (currentMillis - previousMillis >= intervalRun)
+                {
+                    previousMillis = currentMillis;
+                    isMotorRunning = false; // STOP 전환
+                }
+            }
+            else
+            {
+                // [STOP 상태: 120ms]
+                change(Stop); // 정지
+
+                if (currentMillis - previousMillis >= intervalStop)
+                {
+                    previousMillis = currentMillis;
+                    isMotorRunning = true; // RUN 전환
+                }
             }
         }
+    }
+
+    if (runningMode == "exp")
+    {
+        // 실험 모드 코드 작성 가능
+        return;
+    }
+
+    if (runningMode == "ttt")
+    {
+        // TTT 모드 코드 작성 가능
+        return;
     }
 }
