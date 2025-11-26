@@ -34,6 +34,10 @@ int motorSpeed = 200;
 int turnSpeed = 180;
 int direction = 0;
 
+byte buffer[512];
+int buffer_index;
+String receivedData;
+
 // --- [타이머 및 상태 변수 (Non-blocking)] ---
 unsigned long previousMillis = 0; // 일반 주행 펄스 타이머
 const long intervalRun = 100;     // 주행 시간 (ON)
@@ -86,6 +90,8 @@ void setup()
 
     Serial.begin(9600);
     bt_serial.begin(9600);
+
+    buffer_index = 0;
 }
 
 long microseconds_to_cm(long microseconds)
@@ -297,22 +303,23 @@ void printToLCD(String toPrint)
 
 void process_BT_commands()
 {
-    static unsigned long btTimer = 0;
-    if (millis() - btTimer > 200)
-    { // 0.2초마다 전송
-        // 필요시 주석 해제하여 사용
-        /*
-        bt_serial.print("L:");
-        bt_serial.print(getObstacleDistance("l"));
-        bt_serial.print(" R:");
-        bt_serial.print(getObstacleDistance("r"));
-        bt_serial.println();
-        */
-        btTimer = millis();
+    if (bt_serial.available())
+    {
+        byte data = bt_serial.read();
+        buffer[buffer_index++] = data;
+
+        if (data == '\n' || buffer_index >= sizeof(buffer) - 1)
+        {
+            buffer[buffer_index] = '\0'; // Null-terminate the string
+            receivedData = String((char *)buffer);
+
+            Serial.print("Received via BT: ");
+            Serial.println(receivedData);
+
+            // Reset buffer index for next message
+            buffer_index = 0;
+        }
     }
-    // 수신 버퍼 비우기
-    while (bt_serial.available())
-        bt_serial.read();
 }
 
 // --- [메인 루프] ---
