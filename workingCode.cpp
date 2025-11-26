@@ -232,7 +232,7 @@ void exp_mode_update()
 
     // 2. Intersection Detection Logic
     // An intersection is usually when Left or Right (or both) are detected alongside Forward
-    bool isIntersection = (ll || rr) && ff;
+    bool isIntersection = (ll && rr) && ff;
 
     if (isIntersection)
     {
@@ -285,7 +285,7 @@ void execute_path_logic()
         break;
 
     default: // End of line or errors
-        change(Stop);
+        direction = Stop;
         break;
     }
 
@@ -303,15 +303,14 @@ void initiate_turn_left()
 
 void handle_turn_sequence()
 {
-    // This is a blocking-style logic converted to non-blocking
     // 1. Turn for a short time to clear the current intersection line****
     // 2. Continue turning until the Forward sensor sees the next line
 
     unsigned long currentTurnTime = millis() - turnTimer;
 
-    // 1: Force turn for 1200ms
+    // 1: Force turn for initial period (5 turns)
     // This ensures we don't accidentally detect the line we are currently on
-    if (currentTurnTime < 1200)
+    if (currentTurnTime < (intervalRun + intervalStop) * 5)
     {
         change(TurnLeft);
     }
