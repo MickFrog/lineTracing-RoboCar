@@ -30,7 +30,7 @@
 #define Stop 5
 
 // --- [설정 값] ---
-String runningMode = "lfs"; // lfs (Line Following System), stop, exp, ttt
+String runningMode; // lfs (Line Following System), stop, exp, ttt
 
 int motorSpeed = 200;
 int turnSpeed = 180;
@@ -61,6 +61,12 @@ bool isLineLost = false;
 
 // ★ [핵심] 마지막으로 감지된 방향 기억 (기본값: Left)
 int lastSeenDirection = TurnLeft;
+
+// --- [Exploration / Path Planning Variables] ---
+int pathStage = 0;                // 0=Approaching A, 1=Approaching B, 2=Approaching C, 3=Approaching D
+bool passingIntersection = false; // Flag to prevent double counting one intersection
+unsigned long turnTimer = 0;
+bool isTurningExp = false; // Flag if we are currently executing a 90-degree turn
 
 // --- [객체 초기화] ---
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -94,6 +100,7 @@ void setup()
     bt_serial.begin(9600);
 
     buffer_index = 0;
+    runningMode = "stop";
 }
 
 long microseconds_to_cm(long microseconds)
@@ -132,7 +139,7 @@ bool lt_isRight() { return analogRead(LT_RIGHT) > 200; }
 bool lt_isForward() { return analogRead(LT_FORWARD) > 200; }
 
 // --- [핵심 로직: 센서 판단 및 방향 기억] ---
-void lt_mode_update()
+void lfs_mode_update()
 {
     bool ll = lt_isLeft();
     bool ff = lt_isForward();
@@ -187,6 +194,138 @@ void lt_mode_update()
         {
             // 아직 시간 안됨 -> 관성 주행 유지
             direction = Forward;
+        }
+    }
+}
+
+void exp_mode_update()
+{
+    // If we are in the middle of a 90-degree turn, handle that exclusively
+    if (isTurningExp)
+    {
+        handle_turn_sequence();
+        return;
+    }
+
+    bool ll = lt_isLeft();
+    bool ff = lt_isForward();
+    bool rr = lt_isRight();
+
+    // 1. Basic Line Following (Keep the car centered between intersections)
+    if (ff)
+    {
+        direction = Forward;
+    }
+    else if (ll)
+    {
+        direction = TurnLeft;
+    }
+    else if (rr)
+    {
+        direction = TurnRight;
+    }
+    // If line is lost momentarily, keep going straight (inertia)
+    else
+    {
+        direction = Forward;
+    }
+
+    // 2. Intersection Detection Logic
+    // An intersection is usually when Left or Right (or both) are detected alongside Forward
+    bool isIntersection = (ll || rr) && ff;
+
+    if (isIntersection)
+    {
+        if (!passingIntersection)
+        {
+            // We just hit a NEW intersection. Execute the plan.
+            execute_path_logic();
+            passingIntersection = true; // Lock until we leave this intersection
+        }
+    }
+    else
+    {
+        // Reset the lock only when we are strictly back on a single line (Forward only)
+        // This prevents the counter from unnecessarily increasing while passing one cross
+        if (!ll && !rr && ff)
+        {
+            passingIntersection = false;
+        }
+    }
+}
+
+void execute_path_logic()
+{
+    // Current Path: Start -> A(Str) -> B(Left) -> C(Left) -> D(Str)
+
+    switch (pathStage)
+    {
+    case 0: // Intersection A
+        // Plan: Go Straight through A
+        // Action: Do nothing special, just keep 'direction = Forward'
+        // The main loop will drive us through.
+        direction = Forward;
+        break;
+
+    case 1: // Intersection B
+        // Plan: Turn Left
+        initiate_turn_left();
+        break;
+
+    case 2: // Intersection C
+        // Plan: Turn Left
+        initiate_turn_left();
+        break;
+
+    case 3: // Intersection D
+        // Plan: Go Straight
+        direction = Forward;
+        break;
+
+    default: // End of line or errors
+        change(Stop);
+        break;
+    }
+
+    pathStage++; // Move to next stage for the NEXT intersection
+}
+
+// --- Helper Functions for 90 Degree Turns ---
+
+void initiate_turn_left()
+{
+    isTurningExp = true;
+    turnTimer = millis();
+    change(TurnLeft); // Start turning
+}
+
+void handle_turn_sequence()
+{
+    // This is a blocking-style logic converted to non-blocking
+    // 1. Turn for a short time to clear the current intersection line****
+    // 2. Continue turning until the Forward sensor sees the next line
+
+    unsigned long currentTurnTime = millis() - turnTimer;
+
+    // 1: Force turn for 1200ms
+    // This ensures we don't accidentally detect the line we are currently on
+    if (currentTurnTime < 1200)
+    {
+        change(TurnLeft);
+    }
+    // 2: Now wait until we see the line on the Forward sensor
+    else
+    {
+        if (lt_isForward())
+        {
+            // Turn Complete!
+            isTurningExp = false;
+            change(Forward);            // Align and move on
+            passingIntersection = true; // Ensure we don't recount the intersection we just turned at
+        }
+        else
+        {
+            change(TurnLeft); // Keep turning ???? Need to test this out more
         }
     }
 }
@@ -390,8 +529,8 @@ void loop()
             if (isMotorRunning)
             {
                 // [RUN 상태: 100ms]
-                lt_mode_update(); // 센서 확인
-                change();         // 설정된 direction으로 이동
+                lfs_mode_update(); // 센서 확인
+                change();          // 설정된 direction으로 이동
 
                 if (currentMillis - previousMillis >= intervalRun)
                 {
@@ -415,13 +554,36 @@ void loop()
 
     if (runningMode == "exp")
     {
-        // 실험 모드 코드 작성 가능
+        if (isMotorRunning)
+        {
+            // [RUN 상태: 100ms]
+            exp_mode_update(); // 센서 확인
+            change();          // 설정된 direction으로 이동
+
+            if (currentMillis - previousMillis >= intervalRun)
+            {
+                previousMillis = currentMillis;
+                isMotorRunning = false; // STOP 전환
+            }
+        }
+        else
+        {
+            // [STOP 상태: 120ms]
+            change(Stop); // 정지
+
+            if (currentMillis - previousMillis >= intervalStop)
+            {
+                previousMillis = currentMillis;
+                isMotorRunning = true; // RUN 전환
+            }
+        }
         return;
     }
 
     if (runningMode == "ttt")
     {
         // TTT 모드 코드 작성 가능
+        Serial.println("In TTT mode");
         return;
     }
 }
