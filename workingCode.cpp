@@ -30,6 +30,8 @@
 #define Stop 5
 
 // --- [설정 값] ---
+String runningMode = "lfs"; // lfs (Line Following System), stop, exp, ttt
+
 int motorSpeed = 200;
 int turnSpeed = 180;
 int direction = 0;
@@ -312,6 +314,15 @@ void process_BT_commands()
         {
             buffer[buffer_index] = '\0'; // Null-terminate the string
             receivedData = String((char *)buffer);
+
+            // Process the received data: trim and take only the first word
+            receivedData.trim(); // remove leading/trailing whitespace/newlines
+            receivedData.toLowerCase();
+            int sep = receivedData.indexOf(' ');
+            if (sep != -1)
+            {
+                receivedData = receivedData.substring(0, sep);
+            }
 
             Serial.print("Received via BT: ");
             Serial.println(receivedData);
