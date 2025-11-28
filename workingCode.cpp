@@ -4,7 +4,7 @@
 // --- [핀 설정] ---
 #define TRIGGER_PIN_R 12
 #define ECHO_PIN_R 13
-#define TRIGGER_PIN_L 12 // (주의: 사용자가 제공한 핀 번호 유지, 충돌 확인 필요)
+#define TRIGGER_PIN_L 11 // (주의: 사용자가 제공한 핀 번호 유지, 충돌 확인 필요)
 #define ECHO_PIN_L 10
 
 #define ENA 6
@@ -20,7 +20,7 @@
 #define LT_RIGHT A1
 
 #define Light_Sensor A3
-#define LED 11
+#define LED 1
 
 // --- [방향 상수] ---
 #define Forward 1
@@ -67,6 +67,14 @@ int pathStage = 0;                // 0=Approaching A, 1=Approaching B, 2=Approac
 bool passingIntersection = false; // Flag to prevent double counting one intersection
 unsigned long turnTimer = 0;
 bool isTurningExp = false; // Flag if we are currently executing a 90-degree turn
+bool leftDetectorTriggered = false;
+bool rightDetectorTriggered = false;
+int positions[9]; // To store detected obstacle positions
+int positions_index = 0;
+bool obstacleAtTurn = false;
+int coneMin = 5;  // Minimum distance to consider as obstacle
+int coneMax = 50; // Distance to detect cones
+unsigned long intersectionTimer = 0;
 
 // --- [객체 초기화] ---
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -96,7 +104,6 @@ void setup()
     lcd.init();
     lcd.backlight();
 
-    Serial.begin(9600);
     bt_serial.begin(9600);
 
     buffer_index = 0;
@@ -134,9 +141,9 @@ long getObstacleDistance(String s)
 }
 
 // --- [센서 함수] ---
-bool lt_isLeft() { return analogRead(LT_LEFT) > 200; }
-bool lt_isRight() { return analogRead(LT_RIGHT) > 200; }
-bool lt_isForward() { return analogRead(LT_FORWARD) > 200; }
+bool lt_isLeft() { return analogRead(LT_LEFT) > 150; }
+bool lt_isRight() { return analogRead(LT_RIGHT) > 150; }
+bool lt_isForward() { return analogRead(LT_FORWARD) > 150; }
 
 // --- [핵심 로직: 센서 판단 및 방향 기억] ---
 void lfs_mode_update()
@@ -198,6 +205,21 @@ void lfs_mode_update()
     }
 }
 
+void addPositionIfUnique(int pos)
+{
+    for (int i = 0; i < positions_index; i++)
+    {
+        if (positions[i] == pos)
+        {
+            return; // Already exists, do not add
+        }
+    }
+    if (positions_index < (sizeof(positions) / sizeof(positions[0])))
+    {
+        positions[positions_index++] = pos;
+    }
+}
+
 void exp_mode_update()
 {
     // If we are in the middle of a 90-degree turn, handle that exclusively
@@ -210,6 +232,7 @@ void exp_mode_update()
     bool ll = lt_isLeft();
     bool ff = lt_isForward();
     bool rr = lt_isRight();
+    unsigned long currentMillis = millis();
 
     // 1. Basic Line Following (Keep the car centered between intersections)
     if (ff)
@@ -267,21 +290,63 @@ void execute_path_logic()
         // Action: Do nothing special, just keep 'direction = Forward'
         // The main loop will drive us through.
         direction = Forward;
+
+        if (leftDetectorTriggered)
+        {
+            addPositionIfUnique(8);        // Obstacle detected on left at A
+            leftDetectorTriggered = false; // Reset for next use
+        }
+        if (rightDetectorTriggered)
+        {
+            addPositionIfUnique(9);         // Obstacle detected on right at A
+            rightDetectorTriggered = false; // Reset for next use
+        }
         break;
 
     case 1: // Intersection B
         // Plan: Turn Left
+        change(Forward);
+        delay(250);
+
         initiate_turn_left();
+
+        if (leftDetectorTriggered)
+        {
+            addPositionIfUnique(5);        // Obstacle detected on left at B
+            leftDetectorTriggered = false; // Reset for next use
+        }
+        if (rightDetectorTriggered)
+        {
+            addPositionIfUnique(6);         // Obstacle detected on right at B
+            rightDetectorTriggered = false; // Reset for next use
+        }
         break;
 
     case 2: // Intersection C
         // Plan: Turn Left
+        change(Forward);
+        delay(250);
+
         initiate_turn_left();
+
+        if (rightDetectorTriggered)
+        {
+            addPositionIfUnique(2);         // Obstacle detected on left at C
+            rightDetectorTriggered = false; // Reset for next use
+        }
+
         break;
 
     case 3: // Intersection D
         // Plan: Go Straight
         direction = Forward;
+
+        if (rightDetectorTriggered)
+        {
+            addPositionIfUnique(4);         // Obstacle detected on left at D
+            rightDetectorTriggered = false; // Reset for next use
+        }
+
         break;
 
     default: // End of line or errors
@@ -308,25 +373,45 @@ void handle_turn_sequence()
 
     unsigned long currentTurnTime = millis() - turnTimer;
 
-    // 1: Force turn for initial period (5 turns)
+    // 1: Force turn for initial period (10 turns)
     // This ensures we don't accidentally detect the line we are currently on
-    if (currentTurnTime < (intervalRun + intervalStop) * 5)
+    if (currentTurnTime < (intervalRun + intervalStop) * 10)
     {
         change(TurnLeft);
+
+        if ((pathStage == 2) && !obstacleAtTurn && (getObstacleDistance("r") > coneMin && getObstacleDistance("r") < coneMax))
+        {
+            // If there's an obstacle on the right while turning left, we might be turning at an obstacle
+            obstacleAtTurn = true;
+            rightDetectorTriggered = false;
+            addPositionIfUnique(3); // Obstacle detected on right at B during left turn
+            bt_serial.println("Turning at obstacle on right!");
+        }
+
+        if ((pathStage == 3) && !obstacleAtTurn && (getObstacleDistance("r") > coneMin && getObstacleDistance("r") < coneMax))
+        {
+            // If there's an obstacle on the right while turning left, we might be turning at an obstacle
+            obstacleAtTurn = true;
+            rightDetectorTriggered = false;
+            addPositionIfUnique(1); // Obstacle detected on right at C during left turn
+            bt_serial.println("Turning at obstacle on right!");
+        }
     }
     // 2: Now wait until we see the line on the Forward sensor
     else
     {
+        obstacleAtTurn = false; // Reset for next turn
         if (lt_isForward())
         {
             // Turn Complete!
             isTurningExp = false;
             change(Forward);            // Align and move on
             passingIntersection = true; // Ensure we don't recount the intersection we just turned at
+            intersectionTimer = millis();
         }
         else
         {
-            change(TurnRight); // Keep turning ???? Need to test this out more
+            change(TurnLeft); // Keep turning ???? Need to test this out more
         }
     }
 }
@@ -464,13 +549,30 @@ void process_BT_commands()
                 receivedData = receivedData.substring(0, sep);
             }
 
-            Serial.print("Received via BT: ");
-            Serial.println(receivedData);
-
             // Update runningMode based on received command
             // Set runningMode accordingly coz only these 4 modes are valid
             if (receivedData == "stop")
             {
+                if (runningMode == "exp" && pathStage >= 4)
+                {
+                    if (rightDetectorTriggered)
+                    {
+                        addPositionIfUnique(7);         // Obstacle detected after all intersections
+                        rightDetectorTriggered = false; // Reset for next use
+                    }
+                    // send positions via Bluetooth - to be changed to print to LCD
+                    bt_serial.print("Positions: ");
+                    for (int i = 0; i < positions_index; i++)
+                    {
+                        bt_serial.print(positions[i]);
+                        if (i < positions_index - 1)
+                            bt_serial.print(", ");
+                    }
+                    bt_serial.println();
+
+                    // runningMode = "stop"; // Stop further processing
+                    // return;
+                }
                 runningMode = "stop";
             }
             else if (receivedData == "lfs")
@@ -480,6 +582,7 @@ void process_BT_commands()
             else if (receivedData == "exp" || receivedData == "start")
             {
                 runningMode = "exp";
+                bt_serial.println("Exploration Mode Started");
             }
             else if (receivedData == "ttt")
             {
@@ -561,6 +664,20 @@ void loop()
             exp_mode_update(); // 센서 확인
             change();          // 설정된 direction으로 이동
 
+            if (!rightDetectorTriggered && (getObstacleDistance("r") > coneMin && getObstacleDistance("r") < coneMax) && !isTurningExp)
+            {
+                bt_serial.print("Right Detector distance: ");
+                bt_serial.println(getObstacleDistance("r"));
+                rightDetectorTriggered = true;
+            }
+
+            if (!leftDetectorTriggered && (getObstacleDistance("l") > coneMin && getObstacleDistance("l") < coneMax) && !isTurningExp)
+            {
+                bt_serial.print("Left Detector distance: ");
+                bt_serial.println(getObstacleDistance("l"));
+                leftDetectorTriggered = true;
+            }
+
             if (currentMillis - previousMillis >= intervalRun)
             {
                 previousMillis = currentMillis;
@@ -584,7 +701,6 @@ void loop()
     if (runningMode == "ttt")
     {
         // TTT 모드 코드 작성 가능
-        Serial.println("In TTT mode");
         return;
     }
 }
