@@ -4,7 +4,7 @@
 // --- [핀 설정] ---
 #define TRIGGER_PIN_R 12
 #define ECHO_PIN_R 13
-#define TRIGGER_PIN_L 11 // (주의: 사용자가 제공한 핀 번호 유지, 충돌 확인 필요)
+#define TRIGGER_PIN_L 11
 #define ECHO_PIN_L 10
 
 #define ENA 6
@@ -30,7 +30,7 @@
 #define Stop 5
 
 // --- [설정 값] ---
-String runningMode; // lfs (Line Following System), stop, exp, ttt
+String runningMode; // lfs, stop, exp, ttt
 
 int motorSpeed = 200;
 int turnSpeed = 180;
@@ -40,41 +40,55 @@ byte buffer[512];
 int buffer_index;
 String receivedData;
 
-// --- [타이머 및 상태 변수 (Non-blocking)] ---
-unsigned long previousMillis = 0; // 일반 주행 펄스 타이머
-const long intervalRun = 100;     // 주행 시간 (ON)
-const long intervalStop = 120;    // 정지 시간 (OFF)
+// --- [타이머 및 상태 변수] ---
+unsigned long previousMillis = 0;
+const long intervalRun = 100;
+const long intervalStop = 120;
 
-unsigned long uTurnTimer = 0;  // U-turn 펄스 타이머
-const long uTurnRunTime = 100; // U-turn 회전 시간
-const long uTurnStopTime = 50; // U-turn 정지 시간
+unsigned long uTurnTimer = 0;
+const long uTurnRunTime = 100;
+const long uTurnStopTime = 50;
 
 // --- [플래그 변수] ---
-bool isMotorRunning = false;  // 현재 모터가 도는 중인지 (일반 주행용)
-bool isUturning = false;      // 현재 U-turn 모드인지
-bool uTurnMotorState = false; // U-turn 중 모터 ON/OFF 상태
+bool isMotorRunning = false;
+bool isUturning = false;
+bool uTurnMotorState = false;
 
-// --- [라인 이탈 및 스마트 U-turn 변수] ---
+// --- [라인 이탈 변수] ---
 unsigned long lineLostStartTime = 0;
 bool isLineLost = false;
-#define LINE_LOST_THRESHOLD 1000 // 1초 이상 선 없으면 U-turn
+#define LINE_LOST_THRESHOLD 1000
 
-// ★ [핵심] 마지막으로 감지된 방향 기억 (기본값: Left)
 int lastSeenDirection = TurnLeft;
 
-// --- [Exploration / Path Planning Variables] ---
-int pathStage = 0;                // 0=Approaching A, 1=Approaching B, 2=Approaching C, 3=Approaching D
-bool passingIntersection = false; // Flag to prevent double counting one intersection
+// --- [Exploration 변수] ---
+int pathStage = 0;
+bool passingIntersection = false;
 unsigned long turnTimer = 0;
-bool isTurningExp = false; // Flag if we are currently executing a 90-degree turn
+bool isTurningExp = false;
 bool leftDetectorTriggered = false;
 bool rightDetectorTriggered = false;
-int positions[9]; // To store detected obstacle positions
+int positions[9];
 int positions_index = 0;
 bool obstacleAtTurn = false;
-int coneMin = 5;  // Minimum distance to consider as obstacle
-int coneMax = 50; // Distance to detect cones
+int coneMin = 5;
+int coneMax = 25;
 unsigned long intersectionTimer = 0;
+
+// --- [탐지 자격 부여(Debouncing) 변수] ---
+int leftClearCount = 0;
+int rightClearCount = 0;
+const int CLEAR_THRESHOLD = 5;
+
+bool leftSensorReady = true;
+bool rightSensorReady = true;
+
+// --- [Tic-Tac-Toe 변수] ---
+int ttt_board[10];
+bool waitingForTTTInput = false;
+
+const int winCombos[8][3] = {
+    {1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {1, 4, 7}, {2, 5, 8}, {3, 6, 9}, {1, 5, 9}, {3, 5, 7}};
 
 // --- [객체 초기화] ---
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -83,6 +97,9 @@ SoftwareSerial bt_serial(8, 9);
 // --- [함수 선언] ---
 void startUturn();
 void change(char myDirection);
+void printToLCD(String line1, String line2);
+
+// --- [구현부] ---
 
 void setup()
 {
@@ -108,6 +125,8 @@ void setup()
 
     buffer_index = 0;
     runningMode = "stop";
+
+    printToLCD("Ready...", "");
 }
 
 long microseconds_to_cm(long microseconds)
@@ -118,7 +137,6 @@ long microseconds_to_cm(long microseconds)
 long getObstacleDistance(String s)
 {
     long duration;
-    // PulseIn에 타임아웃(5000us = 5ms)을 주어 블로킹 방지
     if (s == "r")
     {
         digitalWrite(TRIGGER_PIN_R, HIGH);
@@ -145,7 +163,7 @@ bool lt_isLeft() { return analogRead(LT_LEFT) > 150; }
 bool lt_isRight() { return analogRead(LT_RIGHT) > 150; }
 bool lt_isForward() { return analogRead(LT_FORWARD) > 150; }
 
-// --- [핵심 로직: 센서 판단 및 방향 기억] ---
+// --- [LFS Logic] ---
 void lfs_mode_update()
 {
     bool ll = lt_isLeft();
@@ -155,51 +173,35 @@ void lfs_mode_update()
     if (ll || ff || rr)
     {
         isLineLost = false;
-
-        // ★ [Memory Logic] 마지막으로 감지한 코너 방향 업데이트
-        // ff만 보일 때는 업데이트 하지 않아 직전 경향성 유지
         if (ll)
             lastSeenDirection = TurnLeft;
         else if (rr)
             lastSeenDirection = TurnRight;
 
-        // 방향 결정 로직
         if (ll || (ll && ff) || (ll && ff && rr))
-        {
             direction = TurnLeft;
-        }
         else if (ff && !rr)
-        {
             direction = Forward;
-        }
         else if (rr && !ff)
-        {
             direction = TurnRight;
-        }
         else
-        {
             direction = Forward;
-        }
     }
     else
     {
-        // 라인 감지 안됨 (All Low)
         if (!isLineLost)
         {
-            // 처음 놓친 순간
             lineLostStartTime = millis();
             isLineLost = true;
-            direction = Forward; // 관성 주행 (잠시 직진)
+            direction = Forward;
         }
         else if (isLineLost && millis() - lineLostStartTime > LINE_LOST_THRESHOLD)
         {
-            // 일정 시간(1초) 지남 -> U-turn 시작
             startUturn();
             isLineLost = false;
         }
         else
         {
-            // 아직 시간 안됨 -> 관성 주행 유지
             direction = Forward;
         }
     }
@@ -210,9 +212,7 @@ void addPositionIfUnique(int pos)
     for (int i = 0; i < positions_index; i++)
     {
         if (positions[i] == pos)
-        {
-            return; // Already exists, do not add
-        }
+            return;
     }
     if (positions_index < (sizeof(positions) / sizeof(positions[0])))
     {
@@ -222,201 +222,203 @@ void addPositionIfUnique(int pos)
 
 void exp_mode_update()
 {
-    // If we are in the middle of a 90-degree turn, handle that exclusively
     if (isTurningExp)
     {
         handle_turn_sequence();
         return;
     }
 
+    long distL = getObstacleDistance("l");
+    long distR = getObstacleDistance("r");
+
+    if (distL <= coneMin || distL >= coneMax)
+    {
+        leftClearCount++;
+        if (leftClearCount >= CLEAR_THRESHOLD)
+            leftSensorReady = true;
+    }
+    else
+        leftClearCount = 0;
+
+    if (distR <= coneMin || distR >= coneMax)
+    {
+        rightClearCount++;
+        if (rightClearCount >= CLEAR_THRESHOLD)
+            rightSensorReady = true;
+    }
+    else
+        rightClearCount = 0;
+
+    if (!rightDetectorTriggered && (distR > coneMin && distR < coneMax) && rightSensorReady)
+    {
+        bt_serial.print("R Obs: ");
+        bt_serial.println(distR);
+        rightDetectorTriggered = true;
+        rightSensorReady = false;
+    }
+
+    if (!leftDetectorTriggered && (distL > coneMin && distL < coneMax) && leftSensorReady)
+    {
+        bt_serial.print("L Obs: ");
+        bt_serial.println(distL);
+        leftDetectorTriggered = true;
+        leftSensorReady = false;
+    }
+
     bool ll = lt_isLeft();
     bool ff = lt_isForward();
     bool rr = lt_isRight();
-    unsigned long currentMillis = millis();
 
-    // 1. Basic Line Following (Keep the car centered between intersections)
     if (ff)
-    {
         direction = Forward;
-    }
     else if (ll)
-    {
         direction = TurnLeft;
-    }
     else if (rr)
-    {
         direction = TurnRight;
-    }
-    // If line is lost momentarily, keep going straight (inertia)
     else
-    {
         direction = Forward;
-    }
 
-    // 2. Intersection Detection Logic
-    // An intersection is usually when Left or Right (or both) are detected alongside Forward
     bool isIntersection = (ll && rr) && ff;
 
     if (isIntersection)
     {
         if (!passingIntersection)
         {
-            bt_serial.print("Passing Intersection at stage: ");
+            bt_serial.print("Intersection Stage: ");
             bt_serial.println(pathStage);
-            // We just hit a NEW intersection. Execute the plan.
             execute_path_logic();
-            passingIntersection = true; // Lock until we leave this intersection
+            passingIntersection = true;
         }
     }
     else
     {
-        // Reset the lock only when we are strictly back on a single line (Forward only)
-        // This prevents the counter from unnecessarily increasing while passing one cross
         if (!ll && !rr && ff)
-        {
             passingIntersection = false;
-        }
     }
 }
 
 void execute_path_logic()
 {
-    // Current Path: Start -> A(Str) -> B(Left) -> C(Left) -> D(Str)
-
     switch (pathStage)
     {
-    case 0: // Intersection A
-        // Plan: Go Straight through A
-        // Action: Do nothing special, just keep 'direction = Forward'
-        // The main loop will drive us through.
+    case 0:
         direction = Forward;
-
         if (leftDetectorTriggered)
         {
-            addPositionIfUnique(8);        // Obstacle detected on left at A
-            leftDetectorTriggered = false; // Reset for next use
+            addPositionIfUnique(9);
+            leftDetectorTriggered = false;
         }
         if (rightDetectorTriggered)
         {
-            addPositionIfUnique(9);         // Obstacle detected on right at A
-            rightDetectorTriggered = false; // Reset for next use
+            addPositionIfUnique(6);
+            rightDetectorTriggered = false;
         }
         break;
 
-    case 1: // Intersection B
-        // Plan: Turn Left
+    case 1:
         change(Forward);
         delay(250);
-
-        initiate_turn_left();
-
+        initiate_turn_right();
         if (leftDetectorTriggered)
         {
-            addPositionIfUnique(5);        // Obstacle detected on left at B
-            leftDetectorTriggered = false; // Reset for next use
+            addPositionIfUnique(8);
+            leftDetectorTriggered = false;
         }
         if (rightDetectorTriggered)
         {
-            addPositionIfUnique(6);         // Obstacle detected on right at B
-            rightDetectorTriggered = false; // Reset for next use
+            addPositionIfUnique(5);
+            rightDetectorTriggered = false;
         }
         break;
 
-    case 2: // Intersection C
-        // Plan: Turn Left
+    case 2:
         change(Forward);
         delay(250);
-
-        initiate_turn_left();
-
+        initiate_turn_right();
+        if (leftDetectorTriggered)
+        {
+            addPositionIfUnique(4);
+            leftDetectorTriggered = false;
+        }
         if (rightDetectorTriggered)
         {
-            addPositionIfUnique(2);         // Obstacle detected on left at C
-            rightDetectorTriggered = false; // Reset for next use
+            addPositionIfUnique(5);
+            rightDetectorTriggered = false;
         }
-
         break;
 
-    case 3: // Intersection D
-        // Plan: Go Straight
+    case 3:
         direction = Forward;
-
+        if (leftDetectorTriggered)
+        {
+            addPositionIfUnique(2);
+            leftDetectorTriggered = false;
+        }
         if (rightDetectorTriggered)
         {
-            addPositionIfUnique(4);         // Obstacle detected on left at D
-            rightDetectorTriggered = false; // Reset for next use
+            addPositionIfUnique(5);
+            rightDetectorTriggered = false;
         }
-
         break;
 
-    default: // End of line or errors
+    default:
         direction = Stop;
         break;
     }
-
-    pathStage++; // Move to next stage for the NEXT intersection
+    pathStage++;
 }
 
-// --- Helper Functions for 90 Degree Turns ---
-
-void initiate_turn_left()
+void initiate_turn_right()
 {
     isTurningExp = true;
     turnTimer = millis();
-    change(TurnLeft); // Start turning
+    change(TurnRight);
 }
 
 void handle_turn_sequence()
 {
-    // 1. Turn for a short time to clear the current intersection line****
-    // 2. Continue turning until the Forward sensor sees the next line
-
     unsigned long currentTurnTime = millis() - turnTimer;
+    long distL = getObstacleDistance("l");
 
-    // 1: Force turn for initial period (10 turns)
-    // This ensures we don't accidentally detect the line we are currently on
-    if (currentTurnTime < (intervalRun + intervalStop) * 10)
+    if (currentTurnTime < (intervalRun + intervalStop) * 8)
     {
-        change(TurnLeft);
+        change(TurnRight);
 
-        if ((pathStage == 2) && !obstacleAtTurn && (getObstacleDistance("r") > coneMin && getObstacleDistance("r") < coneMax))
+        if ((pathStage == 2) && !obstacleAtTurn && (distL > coneMin && distL < coneMax))
         {
-            // If there's an obstacle on the right while turning left, we might be turning at an obstacle
             obstacleAtTurn = true;
-            rightDetectorTriggered = false;
-            addPositionIfUnique(3); // Obstacle detected on right at B during left turn
-            bt_serial.println("Turning at obstacle on right!");
+            leftDetectorTriggered = false;
+            addPositionIfUnique(7);
+            leftSensorReady = false;
+            leftClearCount = 0;
         }
 
-        if ((pathStage == 3) && !obstacleAtTurn && (getObstacleDistance("r") > coneMin && getObstacleDistance("r") < coneMax))
+        if ((pathStage == 3) && !obstacleAtTurn && (distL > coneMin && distL < coneMax))
         {
-            // If there's an obstacle on the right while turning left, we might be turning at an obstacle
             obstacleAtTurn = true;
-            rightDetectorTriggered = false;
-            addPositionIfUnique(1); // Obstacle detected on right at C during left turn
-            bt_serial.println("Turning at obstacle on right!");
+            leftDetectorTriggered = false;
+            addPositionIfUnique(1);
+            leftSensorReady = false;
+            leftClearCount = 0;
         }
     }
-    // 2: Now wait until we see the line on the Forward sensor
     else
     {
-        obstacleAtTurn = false; // Reset for next turn
+        obstacleAtTurn = false;
         if (lt_isForward())
         {
-            // Turn Complete!
             isTurningExp = false;
-            change(Forward);            // Align and move on
-            passingIntersection = true; // Ensure we don't recount the intersection we just turned at
+            change(Forward);
+            passingIntersection = true;
             intersectionTimer = millis();
         }
         else
         {
-            change(TurnLeft); // Keep turning ???? Need to test this out more
+            change(TurnRight);
         }
     }
 }
 
-// --- [모터 제어 함수] ---
 void change(char myDirection = direction)
 {
     if (myDirection != 0)
@@ -456,76 +458,193 @@ void change(char myDirection = direction)
     }
 }
 
-// --- [U-turn 시작 설정] ---
 void startUturn()
 {
     isUturning = true;
-    uTurnMotorState = true; // 바로 회전 시작
+    uTurnMotorState = true;
     uTurnTimer = millis();
-
-    // ★ [스마트 U-turn] 마지막으로 본 방향으로 회전 시작
-    // 오른쪽 보다가 놓쳤으면 오른쪽으로 돌고, 왼쪽이면 왼쪽으로 돔
     change(lastSeenDirection);
-
-    // 디버깅용 (필요시 주석 해제)
-    // if(lastSeenDirection == TurnRight) Serial.println("U-Turn Right!");
-    // else Serial.println("U-Turn Left!");
 }
 
-// --- [U-turn 처리 프로세스 (Non-blocking)] ---
 void processUturn()
 {
-    // 1. 종료 조건: 라인을 다시 찾았는가?
     if (lt_isForward() || lt_isLeft() || lt_isRight())
     {
         isUturning = false;
-
-        // 찾은 즉시 lastSeenDirection 최신화
         if (lt_isLeft())
             lastSeenDirection = TurnLeft;
         if (lt_isRight())
             lastSeenDirection = TurnRight;
-
         return;
     }
 
     unsigned long currentMillis = millis();
-
-    // 2. 펄스 구동 (회전 <-> 정지 반복)
     if (uTurnMotorState)
     {
-        // [회전 중]
-        change(lastSeenDirection); // 기억해둔 방향으로 계속 회전
-
+        change(lastSeenDirection);
         if (currentMillis - uTurnTimer >= uTurnRunTime)
         {
             uTurnTimer = currentMillis;
-            uTurnMotorState = false; // -> 정지로 전환
+            uTurnMotorState = false;
         }
     }
     else
     {
-        // [정지 중]
         change(Stop);
-
         if (currentMillis - uTurnTimer >= uTurnStopTime)
         {
             uTurnTimer = currentMillis;
-            uTurnMotorState = true; // -> 회전으로 전환
+            uTurnMotorState = true;
         }
     }
 }
 
-void printToLCD(String toPrint)
+void printToLCD(String line1, String line2)
 {
-    static unsigned long lcdTimer = 0;
-    if (millis() - lcdTimer > 500)
-    { // 0.5초마다 갱신
+    static String prevLine1 = "";
+    static String prevLine2 = "";
+
+    if (line1 != prevLine1 || line2 != prevLine2)
+    {
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print(toPrint);
-        lcdTimer = millis();
+        lcd.print(line1);
+        if (line2 != "")
+        {
+            lcd.setCursor(0, 1);
+            lcd.print(line2);
+        }
+        prevLine1 = line1;
+        prevLine2 = line2;
     }
+}
+
+// --- [Tic-Tac-Toe Minimax Algorithm] ---
+void clearBoard()
+{
+    for (int i = 1; i <= 9; i++)
+        ttt_board[i] = 0;
+}
+
+bool checkWin(int player)
+{
+    for (int i = 0; i < 8; i++)
+    {
+        if (ttt_board[winCombos[i][0]] == player &&
+            ttt_board[winCombos[i][1]] == player &&
+            ttt_board[winCombos[i][2]] == player)
+            return true;
+    }
+    return false;
+}
+
+bool isBoardFull()
+{
+    for (int i = 1; i <= 9; i++)
+        if (ttt_board[i] == 0)
+            return false;
+    return true;
+}
+
+// Minimax 재귀 함수
+// isMaximizing: True면 Player A(1)의 턴(이득 극대화), False면 Player B(2)의 턴(손실 극대화)
+int minimax(int depth, bool isMaximizing)
+{
+    if (checkWin(1))
+        return 10 - depth; // A 승리 (빨리 이길수록 점수 높음)
+    if (checkWin(2))
+        return depth - 10; // B 승리 (A 패배)
+    if (isBoardFull())
+        return 0; // 무승부
+
+    if (isMaximizing)
+    {
+        int bestScore = -1000;
+        for (int i = 1; i <= 9; i++)
+        {
+            if (ttt_board[i] == 0)
+            {
+                ttt_board[i] = 1; // A가 둬봄
+                int score = minimax(depth + 1, false);
+                ttt_board[i] = 0; // 원상복구
+                if (score > bestScore)
+                    bestScore = score;
+            }
+        }
+        return bestScore;
+    }
+    else
+    {
+        int bestScore = 1000;
+        for (int i = 1; i <= 9; i++)
+        {
+            if (ttt_board[i] == 0)
+            {
+                ttt_board[i] = 2; // B가 둬봄
+                int score = minimax(depth + 1, true);
+                ttt_board[i] = 0; // 원상복구
+                if (score < bestScore)
+                    bestScore = score;
+            }
+        }
+        return bestScore;
+    }
+}
+
+// 최적의 수 찾기 메인 함수
+int findWinningMove()
+{
+    int bestVal = -1000;
+    int bestMove = 0;
+
+    // 빈칸을 모두 순회하며 Minimax 점수 계산
+    for (int i = 1; i <= 9; i++)
+    {
+        if (ttt_board[i] == 0)
+        {
+            ttt_board[i] = 1;                // A가 여기에 둔다면?
+            int moveVal = minimax(0, false); // 그 다음은 B 차례
+            ttt_board[i] = 0;                // 원상복구
+
+            if (moveVal > bestVal)
+            {
+                bestMove = i;
+                bestVal = moveVal;
+            }
+        }
+    }
+    return bestMove; // 최적의 위치 반환
+}
+
+void processTTTLogic(String inputStr)
+{
+    clearBoard();
+    inputStr += ",";
+    int startIndex = 0;
+    int commaIndex = inputStr.indexOf(',');
+
+    while (commaIndex != -1)
+    {
+        String numStr = inputStr.substring(startIndex, commaIndex);
+        numStr.trim();
+        int pos = numStr.toInt();
+        if (pos >= 1 && pos <= 9)
+            ttt_board[pos] = 1; // Player A
+        startIndex = commaIndex + 1;
+        commaIndex = inputStr.indexOf(',', startIndex);
+    }
+
+    for (int i = 0; i < positions_index; i++)
+    {
+        int detectedPos = positions[i];
+        if (ttt_board[detectedPos] != 1)
+            ttt_board[detectedPos] = 2; // Player B
+    }
+
+    int nextMove = findWinningMove();
+    bt_serial.print("Rec Move A: ");
+    bt_serial.println(nextMove);
+    printToLCD("TTT Win Move:", String(nextMove));
 }
 
 void process_BT_commands()
@@ -537,73 +656,95 @@ void process_BT_commands()
 
         if (data == '\n' || buffer_index >= sizeof(buffer) - 1)
         {
-            buffer[buffer_index] = '\0'; // Null-terminate the string
+            buffer[buffer_index] = '\0';
             receivedData = String((char *)buffer);
+            receivedData.trim();
+            buffer_index = 0;
 
-            // Process the received data: trim and take only the first word
-            receivedData.trim(); // remove leading/trailing whitespace/newlines
-            receivedData.toLowerCase();
-            int sep = receivedData.indexOf(' ');
-            if (sep != -1)
+            if (waitingForTTTInput)
             {
-                receivedData = receivedData.substring(0, sep);
+                processTTTLogic(receivedData);
+                waitingForTTTInput = false;
+                runningMode = "stop";
+                return;
             }
 
-            // Update runningMode based on received command
-            // Set runningMode accordingly coz only these 4 modes are valid
-            if (receivedData == "stop")
+            receivedData.toLowerCase();
+            String command = receivedData;
+            int sep = receivedData.indexOf(' ');
+            if (sep != -1)
+                command = receivedData.substring(0, sep);
+
+            if (command == "stop")
             {
                 if (runningMode == "exp" && pathStage >= 4)
                 {
+                    if (leftDetectorTriggered)
+                    {
+                        addPositionIfUnique(3);
+                        leftDetectorTriggered = false;
+                    }
                     if (rightDetectorTriggered)
                     {
-                        addPositionIfUnique(7);         // Obstacle detected after all intersections
-                        rightDetectorTriggered = false; // Reset for next use
+                        addPositionIfUnique(6);
+                        rightDetectorTriggered = false;
                     }
-                    // send positions via Bluetooth - to be changed to print to LCD
-                    bt_serial.print("Positions: ");
+
+                    for (int i = 0; i < positions_index - 1; i++)
+                    {
+                        for (int j = 0; j < positions_index - i - 1; j++)
+                        {
+                            if (positions[j] > positions[j + 1])
+                            {
+                                int temp = positions[j];
+                                positions[j] = positions[j + 1];
+                                positions[j + 1] = temp;
+                            }
+                        }
+                    }
+
+                    String posStr = "";
                     for (int i = 0; i < positions_index; i++)
                     {
-                        bt_serial.print(positions[i]);
+                        posStr += String(positions[i]);
                         if (i < positions_index - 1)
-                            bt_serial.print(", ");
+                            posStr += ",";
                     }
-                    bt_serial.println();
-
-                    // runningMode = "stop"; // Stop further processing
-                    // return;
+                    bt_serial.print("Positions: ");
+                    bt_serial.println(posStr);
+                    printToLCD("Found Obs:", posStr);
                 }
                 runningMode = "stop";
             }
-            else if (receivedData == "lfs")
-            {
+            else if (command == "lfs")
                 runningMode = "lfs";
-            }
-            else if (receivedData == "exp" || receivedData == "start")
+            else if (command == "exp" || command == "start")
             {
                 runningMode = "exp";
                 bt_serial.println("Exploration Mode Started");
             }
-            else if (receivedData == "ttt")
+            else if (command == "ttt")
             {
                 runningMode = "ttt";
+                waitingForTTTInput = true;
+                bt_serial.println("Enter Player A nums:");
+                printToLCD("Mode: TTT Input", "Waiting...");
             }
-
-            // Reset buffer index for next message
-            buffer_index = 0;
         }
     }
 }
 
-// --- [메인 루프] ---
 void loop()
 {
     process_BT_commands();
-    printToLCD("Running...");
-
     digitalWrite(LED, LOW);
 
     unsigned long currentMillis = millis();
+
+    if (runningMode != "stop" && runningMode != "ttt")
+    {
+        printToLCD("Running Mode:", runningMode);
+    }
 
     if (runningMode == "stop")
     {
@@ -620,37 +761,27 @@ void loop()
             digitalWrite(LED, HIGH);
             return;
         }
-
-        // 1. U-turn 상황 (최우선 처리)
         if (isUturning)
-        {
             processUturn();
-        }
-
-        // 2. 일반 주행 상황 (Pulse 구동)
         else
         {
             if (isMotorRunning)
             {
-                // [RUN 상태: 100ms]
-                lfs_mode_update(); // 센서 확인
-                change();          // 설정된 direction으로 이동
-
+                lfs_mode_update();
+                change();
                 if (currentMillis - previousMillis >= intervalRun)
                 {
                     previousMillis = currentMillis;
-                    isMotorRunning = false; // STOP 전환
+                    isMotorRunning = false;
                 }
             }
             else
             {
-                // [STOP 상태: 120ms]
-                change(Stop); // 정지
-
+                change(Stop);
                 if (currentMillis - previousMillis >= intervalStop)
                 {
                     previousMillis = currentMillis;
-                    isMotorRunning = true; // RUN 전환
+                    isMotorRunning = true;
                 }
             }
         }
@@ -660,47 +791,23 @@ void loop()
     {
         if (isMotorRunning)
         {
-            // [RUN 상태: 100ms]
-            exp_mode_update(); // 센서 확인
-            change();          // 설정된 direction으로 이동
-
-            if (!rightDetectorTriggered && (getObstacleDistance("r") > coneMin && getObstacleDistance("r") < coneMax) && !isTurningExp)
-            {
-                bt_serial.print("Right Detector distance: ");
-                bt_serial.println(getObstacleDistance("r"));
-                rightDetectorTriggered = true;
-            }
-
-            if (!leftDetectorTriggered && (getObstacleDistance("l") > coneMin && getObstacleDistance("l") < coneMax) && !isTurningExp)
-            {
-                bt_serial.print("Left Detector distance: ");
-                bt_serial.println(getObstacleDistance("l"));
-                leftDetectorTriggered = true;
-            }
-
+            exp_mode_update();
+            change();
             if (currentMillis - previousMillis >= intervalRun)
             {
                 previousMillis = currentMillis;
-                isMotorRunning = false; // STOP 전환
+                isMotorRunning = false;
             }
         }
         else
         {
-            // [STOP 상태: 120ms]
-            change(Stop); // 정지
-
+            change(Stop);
             if (currentMillis - previousMillis >= intervalStop)
             {
                 previousMillis = currentMillis;
-                isMotorRunning = true; // RUN 전환
+                isMotorRunning = true;
             }
         }
-        return;
-    }
-
-    if (runningMode == "ttt")
-    {
-        // TTT 모드 코드 작성 가능
         return;
     }
 }
