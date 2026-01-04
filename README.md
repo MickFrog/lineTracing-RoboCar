@@ -105,6 +105,4 @@ This project successfully demonstrates the integration of autonomous navigation,
 
 **📅 Project Date:** December 2025  
 
-**👨‍🎓 Student:** Jordan 
-
 **🎓 Course:** Creative Engineering Design - Year 1, Fall Semester
