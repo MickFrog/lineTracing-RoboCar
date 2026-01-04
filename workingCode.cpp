@@ -72,7 +72,7 @@ int positions[9];
 int positions_index = 0;
 bool obstacleAtTurn = false;
 int coneMin = 5;
-int coneMax = 25;
+int coneMax = 40;
 unsigned long intersectionTimer = 0;
 
 // --- [탐지 자격 부여(Debouncing) 변수] ---
@@ -178,12 +178,14 @@ void lfs_mode_update()
         else if (rr)
             lastSeenDirection = TurnRight;
 
-        if (ll || (ll && ff) || (ll && ff && rr))
+        if (ll || (ll && ff))
             direction = TurnLeft;
         else if (ff && !rr)
             direction = Forward;
         else if (rr && !ff)
             direction = TurnRight;
+        else if (ll && ff && rr)
+            direction = lastSeenDirection;
         else
             direction = Forward;
     }
@@ -340,11 +342,6 @@ void execute_path_logic()
             addPositionIfUnique(4);
             leftDetectorTriggered = false;
         }
-        if (rightDetectorTriggered)
-        {
-            addPositionIfUnique(5);
-            rightDetectorTriggered = false;
-        }
         break;
 
     case 3:
@@ -353,11 +350,6 @@ void execute_path_logic()
         {
             addPositionIfUnique(2);
             leftDetectorTriggered = false;
-        }
-        if (rightDetectorTriggered)
-        {
-            addPositionIfUnique(5);
-            rightDetectorTriggered = false;
         }
         break;
 
@@ -683,11 +675,6 @@ void process_BT_commands()
                     {
                         addPositionIfUnique(3);
                         leftDetectorTriggered = false;
-                    }
-                    if (rightDetectorTriggered)
-                    {
-                        addPositionIfUnique(6);
-                        rightDetectorTriggered = false;
                     }
 
                     for (int i = 0; i < positions_index - 1; i++)
