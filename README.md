@@ -90,10 +90,6 @@ Note: I forgot to take a video of the car in action but with the code and a setu
 
 ![Robot Car 1](./img/robotImg_1.jpg)
 
-![Robot Car 2](./img/robotImg_2.jpg)
-
-![Robot Car 3](./img/robotImg_3.jpg)
-
 
 ---
 
